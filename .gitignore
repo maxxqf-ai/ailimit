@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.DS_Store
+
+# never commit real keys; they live in ~/.ailimit/config.json on disk only
+config.json
+.ailimit/
+
+# operational notes (task sheets, private memos) — not part of the deliverable
+replica*.md
+fangfa.md
