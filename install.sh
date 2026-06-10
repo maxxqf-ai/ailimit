@@ -22,17 +22,27 @@ LOG_DIR="$CONFIG_DIR/logs"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Prefer a python with a rumps wheel (3.11+). System python3 on old macOS
-# is 3.8/3.9 and won't install rumps; we surface that as a clear error
-# from pip rather than guessing here.
+# Prefer a python with a rumps / browser-cookie3 wheel (3.11-3.13).
+# Python 3.14 has no browser-cookie3 wheel yet, so we explicitly reject
+# it rather than letting pip fail with a confusing error.
 pick_python() {
-  for cand in python3.13 python3.12 python3.11 python3; do
+  for cand in python3.13 python3.12 python3.11; do
     if command -v "$cand" >/dev/null 2>&1; then
       echo "$cand"
       return 0
     fi
   done
-  echo "no python3 on PATH" >&2
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "no python3 on PATH" >&2
+    return 1
+  fi
+  actual="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  if python3 -c "import sys; v=sys.version_info; sys.exit(0 if (3,11) <= (v.major,v.minor) < (3,14) else 1)"; then
+    echo "python3"
+    return 0
+  fi
+  echo "ailimit needs Python 3.11-3.13 because browser-cookie3 may not support 3.14 yet" >&2
+  echo "found python3 = $actual on PATH" >&2
   return 1
 }
 

@@ -30,7 +30,7 @@ Logs land in `~/.ailimit/logs/menubar.{out,err}.log`.
 ```bash
 ./uninstall.sh            # leaves app/, venv/, and config.json in place
 ./uninstall.sh --purge    # also removes app/ and venv/  (config.json preserved)
-./uninstall.sh --purge-all  # removes everything except logs
+./uninstall.sh --purge-all  # removes app, venv, logs, and config.json
 ```
 
 Your `~/.ailimit/config.json` (api keys) is **never** removed by default.
@@ -119,6 +119,6 @@ uninstall.sh   unloads agent, removes plist (keeps config by default)
 
 - macOS only (rumps / PyObjC for the status bar; Keychain for Codex cookies).
 - Codex `app-server` path is intentionally disabled.
-- `rumps` needs Python 3.11+ on the install host. The installer prefers `python3.13` → `python3.12` → `python3.11` → `python3`; system 3.8/3.9 will fail at `pip install rumps` and the error is surfaced verbatim.
+- The installer accepts Python 3.11-3.13. It prefers `python3.13` → `python3.12` → `python3.11`; if none of those exist, it falls back to `python3` only when that binary reports a 3.11-3.13 version. Python 3.14 is not yet supported because `browser-cookie3` has no 3.14 wheel; if found, the installer prints a clear "needs Python 3.11-3.13 because browser-cookie3 may not support 3.14 yet" error and exits.
 - API keys never enter git; `~/.ailimit/config.json` and `config.json` are gitignored.
 - Both GLM and MiniMax quota endpoints are unofficial vendor endpoints and may change without notice.

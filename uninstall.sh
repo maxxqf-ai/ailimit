@@ -52,7 +52,22 @@ cat <<MSG
 
 ailimit LaunchAgent removed.
 
+MSG
+
+if [ "$PURGE_ALL" -eq 1 ]; then
+  cat <<MSG
+  everything was purged: app, venv, logs, and config.json
+MSG
+elif [ "$PURGE_APP" -eq 1 ]; then
+  cat <<MSG
+  config preserved: $CONFIG_DIR/config.json
+  logs preserved:   $CONFIG_DIR/logs
+MSG
+else
+  cat <<MSG
   config preserved: $CONFIG_DIR/config.json
   app preserved:    $CONFIG_DIR/app        (--purge removes this)
   venv preserved:   $CONFIG_DIR/venv       (--purge removes this)
+  logs preserved:   $CONFIG_DIR/logs       (--purge-all removes this)
 MSG
+fi
