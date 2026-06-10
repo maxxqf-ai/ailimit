@@ -1,6 +1,6 @@
 # ailimit
 
-**macOS status-bar quota monitor for Codex, GLM, and MiniMax.** Sits in your menu bar as `C 84% 🔋  G 72% 🔋  M 91% 🔋` (short tag + percent + SF Symbols battery icon) and refreshes every 5 minutes. Real numbers from the vendors' own endpoints — no fakes.
+**macOS status-bar quota monitor for Codex, GLM, and MiniMax.** Sits in your menu bar as `C 84% [battery.100]  G 72% [battery.75]  M 91% [battery.100]` — short tag, 5h percent, and a system SF Symbol battery icon (`battery.0/25/50/75/100`, `setTemplate_(True)` so light/dark follow system). Refreshes every 5 minutes. Real numbers from the vendors' own endpoints — no fakes.
 
 | Provider | What we read | How |
 |---|---|---|

@@ -173,7 +173,12 @@ def _battery_symbol(pct: int) -> str:
 
 
 def _sf_battery_image(pct: int, point_size: int = 14):
-    """Return a template-mode NSImage for the percent, or None if AppKit missing."""
+    """Return a template-mode NSImage for the percent, or None if AppKit missing.
+
+    Applies an `NSImageSymbolConfiguration` so the symbol renders at a
+    fixed point size + medium weight regardless of the system menu bar's
+    current font size. Falls back to the bare image if configuration fails.
+    """
     if AppKit is None:
         return None
     try:
@@ -184,6 +189,16 @@ def _sf_battery_image(pct: int, point_size: int = 14):
         return None
     if img is None:
         return None
+    # Apply symbol configuration for consistent size + weight.
+    try:
+        cfg = AppKit.NSImageSymbolConfiguration.configurationWithPointSize_weight_(
+            float(point_size), AppKit.NSFontWeightMedium
+        )
+        sized = img.imageWithSymbolConfiguration_(cfg)
+        if sized is not None:
+            img = sized
+    except Exception:
+        pass  # keep the unsized image rather than failing the whole render
     try:
         img.setTemplate_(True)
     except Exception:
@@ -192,7 +207,13 @@ def _sf_battery_image(pct: int, point_size: int = 14):
 
 
 def _battery_attachment(pct: int, font):
-    """Wrap the SF battery image in an NSTextAttachment so it can sit in an NSAttributedString."""
+    """Wrap the SF battery image in an NSTextAttachment and align it to the font.
+
+    `setBounds_` is required: without it, SF Symbols attachments can float
+    at the attachment-cell's default size and look misaligned against the
+    text baseline. We size the box to the image's natural size and shift
+    it vertically so it centers on the font's cap height.
+    """
     if AppKit is None:
         return None
     img = _sf_battery_image(pct, point_size=14)
@@ -203,13 +224,61 @@ def _battery_attachment(pct: int, font):
         attach.setImage_(img)
     except Exception:
         return None
+    if font is not None:
+        try:
+            cap = float(font.capHeight())
+            try:
+                sz = img.size()
+                w = float(sz.width)
+                h = float(sz.height)
+            except Exception:
+                w, h = 0.0, 0.0
+            if w > 0 and h > 0:
+                y_offset = -((cap - h) / 2.0)
+                attach.setBounds_(AppKit.NSMakeRect(0.0, y_offset, w, h))
+        except Exception:
+            pass
     return attach
+
+
+def _ns_text(s: str, attrs: dict):
+    """Build an NSAttributedString from a plain string + attributes dict.
+
+    Uses the alloc/init form (`initWithString_attributes_`), which is the
+    most reliably bridged across PyObjC versions; some class-factory
+    shortcuts are not consistently available.
+    """
+    if AppKit is None:
+        return None
+    try:
+        return AppKit.NSAttributedString.alloc().initWithString_attributes_(s, attrs)
+    except Exception:
+        return None
+
+
+def _ns_attach(attach):
+    """Wrap an NSTextAttachment in an NSAttributedString. Prefers the class
+    factory form (matches upstream), falling back to alloc/init if the
+    factory returns None or isn't bridged."""
+    if AppKit is None or attach is None:
+        return None
+    try:
+        s = AppKit.NSAttributedString.attributedStringWithAttachment_(attach)
+        if s is not None:
+            return s
+    except Exception:
+        pass
+    try:
+        return AppKit.NSAttributedString.alloc().initWithAttachment_(attach)
+    except Exception:
+        return None
 
 
 def _render_attributed_title(items: list[tuple[str, Optional[int], str]]):
     """Build an NSAttributedString of the form `C 84% [battery]  G -  M ⚠`.
 
     Returns None if AppKit isn't available; callers should fall back to text.
+    May raise — `_set_bar_with_batteries` wraps this in a try/except.
     """
     if AppKit is None:
         return None
@@ -225,24 +294,21 @@ def _render_attributed_title(items: list[tuple[str, Optional[int], str]]):
     for i, (label, pct, state) in enumerate(items):
         prefix = "" if i == 0 else "  "
         if state == "ok" and pct is not None:
-            seg = f"{prefix}{label} {pct}% "
-            result.appendAttributedString_(
-                AppKit.NSAttributedString.attributedStringWithString_attributes_(seg, attrs)
-            )
+            text = _ns_text(f"{prefix}{label} {pct}% ", attrs)
+            if text is not None:
+                result.appendAttributedString_(text)
             attach = _battery_attachment(pct, font)
-            if attach is not None:
-                attach_str = AppKit.NSAttributedString.alloc().initWithAttachment_(attach)
+            attach_str = _ns_attach(attach)
+            if attach_str is not None:
                 result.appendAttributedString_(attach_str)
         elif state == "empty":
-            seg = f"{prefix}{label} -"
-            result.appendAttributedString_(
-                AppKit.NSAttributedString.attributedStringWithString_attributes_(seg, attrs)
-            )
+            text = _ns_text(f"{prefix}{label} -", attrs)
+            if text is not None:
+                result.appendAttributedString_(text)
         else:  # "error"
-            seg = f"{prefix}{label} ⚠"
-            result.appendAttributedString_(
-                AppKit.NSAttributedString.attributedStringWithString_attributes_(seg, attrs)
-            )
+            text = _ns_text(f"{prefix}{label} ⚠", attrs)
+            if text is not None:
+                result.appendAttributedString_(text)
     return result
 
 
@@ -301,17 +367,34 @@ def _status_button(app):
 
 def _set_bar_with_batteries(app, items) -> bool:
     """Set the NSStatusBar button's attributed title to the battery-rendered string.
-    Returns True on success; False if the button or the attributed string couldn't
-    be produced — callers should fall back to plain text in that case."""
+
+    Returns True on success; False on any AppKit failure (button missing,
+    rendering exception, etc.) so callers can fall back to plain text.
+    Any exception from `_render_attributed_title` is caught here — the
+    refresh path must never crash.
+    """
     if AppKit is None:
         return False
     button = _status_button(app)
     if button is None:
         return False
-    attributed = _render_attributed_title(items)
+    try:
+        attributed = _render_attributed_title(items)
+    except Exception:
+        return False
     if attributed is None:
         return False
     try:
+        # Clear prior title/image so the new attributed title shows cleanly
+        # (avoids a ghost SF Symbol on the left from a previous render).
+        try:
+            button.setImage_(None)
+        except Exception:
+            pass
+        try:
+            button.setTitle_("")
+        except Exception:
+            pass
         button.setAttributedTitle_(attributed)
     except Exception:
         return False
