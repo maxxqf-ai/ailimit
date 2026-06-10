@@ -1,6 +1,6 @@
 # ailimit
 
-Local quota / status monitor for three AI providers.
+**macOS status-bar quota monitor for Codex, GLM, and MiniMax.** Sits in your menu bar as `AI  C:84% G:72% M:91%` and refreshes every 5 minutes. Real numbers from the vendors' own endpoints — no fakes.
 
 | Provider | What we read | How |
 |---|---|---|
@@ -10,41 +10,61 @@ Local quota / status monitor for three AI providers.
 
 **No fake numbers.** When `api_key` is empty or set to `***`, the provider is reported as `not_configured` and **no** HTTP request is made. Real failures surface as `auth: failed` / `quota: unavailable` with the underlying status code or message.
 
-## Install
+## Install (macOS, status bar)
 
 ```bash
-pip install -r requirements.txt   # only browser-cookie3, for Codex
+./install.sh
 ```
 
-Python 3.8+ on macOS. `browser-cookie3` needs Keychain access to decrypt Chrome cookies. GLM and MiniMax paths are pure stdlib (`urllib`), no extra wheels required.
+That script:
 
-## CLI
+1. Copies the app to `~/.ailimit/app/`
+2. Creates a venv at `~/.ailimit/venv/` and installs requirements
+3. Writes a LaunchAgent plist at `~/Library/LaunchAgents/com.ailimit.menubar.plist`
+4. Loads the agent — the `AI …` item shows up in your menu bar
+
+Logs land in `~/.ailimit/logs/menubar.{out,err}.log`.
+
+## Uninstall
 
 ```bash
-python3 usage.py                  # status (default)
-python3 usage.py status
-python3 usage.py config --show    # masked dump of ~/.ailimit/config.json
-python3 usage.py config --set glm.enabled=true --set glm.api_key=YOUR_GLM_KEY
-python3 usage.py config --set minimax.enabled=true --set minimax.api_key=YOUR_KEY
-python3 usage.py server --port 8765   # web UI at http://127.0.0.1:8765
+./uninstall.sh            # leaves app/, venv/, and config.json in place
+./uninstall.sh --purge    # also removes app/ and venv/  (config.json preserved)
+./uninstall.sh --purge-all  # removes everything except logs
 ```
 
-`config --set` accepts `provider.field=value`. Booleans (`enabled`) coerce from `true/false/1/0/yes/no/on/off`.
+Your `~/.ailimit/config.json` (api keys) is **never** removed by default.
 
-## Web UI
+## Configure
 
-`python3 usage.py server` launches a stdlib `http.server` (no Flask) on `127.0.0.1:8765`:
+Two ways:
 
-- `/` — status table for every provider (auth, quota, source, last_checked, error)
-- `/settings` — form to edit each provider's `enabled / display_name / api_key / base_url`, posts back to `/settings` and writes `~/.ailimit/config.json`
-- `/api/status` — same data as `/`, as JSON
-- `/api/config` — current config with `api_key` masked, as JSON
+- **Menu bar → Open Settings** — web form on `http://127.0.0.1:8765/settings`. The menubar app starts the web server in a background thread the first time you open it.
+- **CLI**:
+  ```bash
+  python3 usage.py config --set glm.enabled=true --set glm.api_key=YOUR_GLM_KEY
+  python3 usage.py config --set minimax.enabled=true --set minimax.api_key=YOUR_KEY
+  python3 usage.py config --show    # masked dump of ~/.ailimit/config.json
+  ```
 
-## Configuration
+Booleans (`enabled`) coerce from `true/false/1/0/yes/no/on/off`.
+
+The web UI also serves a status table at `/` and a JSON snapshot at `/api/status`.
+
+## Status bar legend
+
+| Mark | Meaning |
+|---|---|
+| `C:84%` | Codex live percent of 5h quota remaining |
+| `G:-` | GLM disabled or not configured (no fake number) |
+| `M:!` | MiniMax live call failed (HTTP error, bad key, etc.) — see dropdown for details |
+| `AI !` prefix | at least one provider is in a failure state |
+
+The dropdown shows the full per-provider block: `auth`, `quota`, `source`, `last_checked`, `error`. Items: `Refresh Now` · `Open Settings` · `Open Web UI` · `Quit`.
+
+## Configuration reference
 
 Stored at `~/.ailimit/config.json` (created on first save with `chmod 600`). Template: [config.example.json](./config.example.json). Real keys never enter git.
-
-Per provider:
 
 | Field | Codex | GLM | MiniMax | Notes |
 |---|---|---|---|---|
@@ -62,16 +82,19 @@ Configs created by earlier versions used the id `MiniMax`. On load, those blocks
 
 ```
 usage.py       CLI: status / config / server
-app.py         minimal http.server web UI
+app.py         stdlib http.server web UI
+menubar.py     macOS status-bar app (rumps) — same check_all() contract
 providers.py   Provider implementations + factory:
-                 CodexProvider  (chatgpt.com cookie, read-only)
-                 GLMProvider    (z.ai TOKENS_LIMIT)
+                 CodexProvider   (chatgpt.com cookie, read-only)
+                 GLMProvider     (z.ai TOKENS_LIMIT)
                  MiniMaxProvider (token_plan/remains)
                  OpenAICompatProvider (kept for future custom providers)
 settings.py    read/write ~/.ailimit/config.json (chmod 600)
+install.sh     copies app to ~/.ailimit/app, builds venv, registers LaunchAgent
+uninstall.sh   unloads agent, removes plist (keeps config by default)
 ```
 
-`providers.check_all()` returns a list of `ProviderStatus`. The CLI, the web UI, and the JSON API all render the same objects, so adding a menu bar layer (`rumps`) later only requires a new file that calls the same function.
+`providers.check_all()` is the single source of truth — the CLI, the web UI, the JSON API, and the menu bar all render the same `ProviderStatus` objects.
 
 ## Quota details
 
@@ -94,7 +117,8 @@ settings.py    read/write ~/.ailimit/config.json (chmod 600)
 
 ## Limitations
 
-- macOS only for Codex (Keychain-decrypted browser cookies).
+- macOS only (rumps / PyObjC for the status bar; Keychain for Codex cookies).
 - Codex `app-server` path is intentionally disabled.
+- `rumps` needs Python 3.11+ on the install host. The installer prefers `python3.13` → `python3.12` → `python3.11` → `python3`; system 3.8/3.9 will fail at `pip install rumps` and the error is surfaced verbatim.
 - API keys never enter git; `~/.ailimit/config.json` and `config.json` are gitignored.
 - Both GLM and MiniMax quota endpoints are unofficial vendor endpoints and may change without notice.
