@@ -59,9 +59,10 @@ def _status_html() -> str:
     <th>Source</th><th>Checked</th><th>Error</th></tr>
 {table}
 </table>
-<p class="dim">Quota for GLM / MiniMax only appears if you configured a working
-optional_quota_url + optional_quota_json_path. Without that, you'll see
-"not_configured" — by design, never a fake number.</p>
+<p class="dim">GLM and MiniMax use built-in quota endpoints — the settings page only needs
+enabled / api_key / base_url. For MiniMax, base_url picks the regional endpoint
+(api.minimaxi.com by default, api.minimax.io if the URL contains "minimax.io").
+api_key empty or "***" shows "not_configured" and skips the live call — never a fake number.</p>
 </body></html>"""
 
 

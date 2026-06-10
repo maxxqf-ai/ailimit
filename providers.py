@@ -359,6 +359,36 @@ class MiniMaxProvider:
             return self.GLOBAL_QUOTA_BASE + self.QUOTA_PATH
         return self.DEFAULT_QUOTA_BASE + self.QUOTA_PATH
 
+    @staticmethod
+    def _compute_5h_used(entry: dict) -> float:
+        """5h used %, preferring count fallback when the percent field is missing or 0.
+
+        Per fangfa.md: when current_interval_remaining_percent is None or 0,
+        the percent field is unreliable — derive from usage/total counts first.
+        Fall back to the literal remaining-percent reading only if counts are
+        unavailable. Always clamp to 0..100.
+        """
+        raw_rem = entry.get("current_interval_remaining_percent")
+        total = entry.get("current_interval_total_count")
+        usage = entry.get("current_interval_usage_count")
+
+        count_used: Optional[float] = None
+        try:
+            if total is not None and float(total) > 0 and usage is not None:
+                count_used = _clamp_percent(round(100.0 * float(usage) / float(total), 1))
+        except (TypeError, ValueError):
+            count_used = None
+
+        if raw_rem is None or raw_rem == 0:
+            if count_used is not None:
+                return count_used
+            # No count available: honour the literal field (None → 0% used, 0 → 100% used).
+            if raw_rem is None:
+                return 0.0
+            return 100.0
+
+        return _clamp_percent(100.0 - _clamp_percent(raw_rem))
+
     def check(self) -> ProviderStatus:
         st = ProviderStatus(
             id=self.block["id"],
@@ -440,19 +470,7 @@ class MiniMaxProvider:
                 return None
             return _clamp_percent(100.0 - _clamp_percent(rem_pct))
 
-        used_5h = _used_from_remaining(chosen.get("current_interval_remaining_percent"))
-        if used_5h is None or used_5h == 0.0:
-            total = chosen.get("current_interval_total_count")
-            usage = chosen.get("current_interval_usage_count")
-            try:
-                if total and total > 0 and usage is not None:
-                    fallback = round(100.0 * float(usage) / float(total), 1)
-                    used_5h = _clamp_percent(fallback)
-            except (TypeError, ValueError):
-                pass
-        if used_5h is None:
-            used_5h = 0.0
-
+        used_5h = self._compute_5h_used(chosen)
         used_7d = _used_from_remaining(chosen.get("current_weekly_remaining_percent"))
         if used_7d is None:
             used_7d = 0.0
