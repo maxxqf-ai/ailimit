@@ -20,6 +20,9 @@ _CHATGPT_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
+# Multimodal entries we ignore when picking a representative text model.
+_MINIMAX_SKIP_MODELS = frozenset({"video", "audio", "image", "music", "speech"})
+
 
 @dataclasses.dataclass
 class ProviderStatus:
@@ -43,32 +46,55 @@ def _now_local_iso() -> str:
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def _clamp_percent(v: Any) -> float:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    if f < 0.0:
+        return 0.0
+    if f > 100.0:
+        return 100.0
+    return f
+
+
+def _fmt_reset(epoch: Any) -> str:
+    """Format an epoch (or ISO string) as local "MM-DD HH:MM". Returns "" on bad input."""
+    if epoch is None or epoch == "":
+        return ""
+    try:
+        if isinstance(epoch, (int, float)):
+            value = float(epoch)
+            # GLM nextResetTime appears in seconds; if someone hands us ms, normalize.
+            if value > 1e12:
+                value = value / 1000.0
+            dt = datetime.datetime.fromtimestamp(value, tz=datetime.timezone.utc)
+        else:
+            dt = datetime.datetime.fromisoformat(str(epoch).replace("Z", "+00:00"))
+        return dt.astimezone().strftime("%m-%d %H:%M")
+    except Exception:
+        return str(epoch)
+
+
+def _fmt_remains_seconds(secs: Any) -> str:
+    try:
+        s = int(secs)
+    except (TypeError, ValueError):
+        return ""
+    if s <= 0:
+        return ""
+    h, rem = divmod(s, 3600)
+    m, _ = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m"
+    return f"{m}m"
+
+
 def _get_json(url: str, headers: dict[str, str], timeout: int = REMOTE_TIMEOUT_SEC) -> Any:
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         body = r.read()
     return json.loads(body.decode("utf-8", errors="replace"))
-
-
-def _walk_json_path(data: Any, path: str) -> Any:
-    """Tiny dotted-path extractor: 'a.b.0.c' supports dict keys and list indexes."""
-    cur = data
-    if not path:
-        return data
-    for raw in path.split("."):
-        if cur is None:
-            return None
-        if isinstance(cur, list):
-            try:
-                cur = cur[int(raw)]
-                continue
-            except (ValueError, IndexError):
-                return None
-        if isinstance(cur, dict):
-            cur = cur.get(raw)
-            continue
-        return None
-    return cur
 
 
 # --------------------------------------------------------------------- Codex
@@ -210,13 +236,259 @@ class CodexProvider:
         }
 
 
+# ----------------------------------------------------------------------- GLM
+class GLMProvider:
+    """Zhipu Coding Plan quota via api.z.ai/api/monitor/usage/quota/limit.
+
+    Authorization is the raw key (no Bearer prefix).
+    Success = HTTP 200 AND `success: true`.
+    """
+
+    DEFAULT_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
+
+    def __init__(self, block: dict[str, Any]):
+        self.block = block
+
+    def check(self) -> ProviderStatus:
+        st = ProviderStatus(
+            id=self.block["id"],
+            display_name=self.block.get("display_name") or "GLM",
+            enabled=bool(self.block.get("enabled", False)),
+            last_checked=_now_local_iso(),
+        )
+        if not st.enabled:
+            st.auth_status = "disabled"
+            st.quota_status = "disabled"
+            return st
+
+        key = (self.block.get("api_key") or "").strip()
+        if not key or key == "***":
+            st.auth_status = "not_configured"
+            st.auth_detail = "api_key is empty or placeholder"
+            st.quota_status = "not_configured"
+            return st
+
+        url = self.DEFAULT_QUOTA_URL
+        st.quota_source = url
+        headers = {
+            "Authorization": key,        # NO Bearer prefix for GLM
+            "Content-Type": "application/json",
+            "Accept-Language": "en-US,en",
+            "User-Agent": "ailimit/0.1",
+        }
+        try:
+            data = _get_json(url, headers)
+        except urllib.error.HTTPError as e:
+            st.auth_status = "failed" if e.code in (401, 403) else "ok"
+            st.quota_status = "unavailable"
+            st.error = f"HTTP {e.code}"
+            st.auth_detail = f"GLM quota endpoint HTTP {e.code}"
+            return st
+        except Exception as e:
+            st.auth_status = "failed"
+            st.quota_status = "unavailable"
+            st.error = str(e)
+            return st
+
+        if not isinstance(data, dict) or not data.get("success"):
+            msg = (data or {}).get("message") if isinstance(data, dict) else None
+            st.auth_status = "failed"
+            st.quota_status = "unavailable"
+            st.error = f"success!=true: {msg or 'unknown'}"
+            return st
+
+        limits_raw = ((data.get("data") or {}).get("limits")) or []
+        token_limits = [
+            l for l in limits_raw
+            if isinstance(l, dict) and l.get("type") == "TOKENS_LIMIT"
+        ]
+        token_limits.sort(key=lambda l: l.get("nextResetTime") or 0)
+
+        if not token_limits:
+            st.auth_status = "ok"
+            st.quota_status = "unavailable"
+            st.quota_detail = "no TOKENS_LIMIT entries in response"
+            st.extra["raw"] = data
+            return st
+
+        primary = token_limits[0]
+        secondary = token_limits[1] if len(token_limits) >= 2 else None
+
+        used_5h = _clamp_percent(primary.get("percentage", 0))
+        remaining_5h = 100.0 - used_5h
+        reset_5h = _fmt_reset(primary.get("nextResetTime"))
+        parts = [f"5h: {remaining_5h:.1f}% left"
+                 + (f" (reset {reset_5h})" if reset_5h else "")]
+
+        if secondary is not None:
+            used_7d = _clamp_percent(secondary.get("percentage", 0))
+            remaining_7d = 100.0 - used_7d
+            reset_7d = _fmt_reset(secondary.get("nextResetTime"))
+            parts.append(f"7d: {remaining_7d:.1f}% left"
+                         + (f" (reset {reset_7d})" if reset_7d else ""))
+            st.extra["weekly"] = {"used_percent": used_7d,
+                                  "resets_at": secondary.get("nextResetTime")}
+
+        st.auth_status = "ok"
+        st.auth_detail = f"{len(token_limits)} TOKENS_LIMIT entries"
+        st.quota_status = "ok"
+        st.quota_detail = ", ".join(parts)
+        st.extra["primary"] = {"used_percent": used_5h,
+                               "resets_at": primary.get("nextResetTime")}
+        return st
+
+
+# ------------------------------------------------------------------ MiniMax
+class MiniMaxProvider:
+    """MiniMax token_plan/remains quota.
+
+    Bearer auth. HTTP 200 alone is not success — must check base_resp.status_code == 0.
+    Picks `model_name == "general"` if present, else first non-multimodal entry.
+    """
+
+    DEFAULT_QUOTA_BASE = "https://api.minimaxi.com"
+    GLOBAL_QUOTA_BASE = "https://api.minimax.io"
+    QUOTA_PATH = "/v1/token_plan/remains"
+
+    def __init__(self, block: dict[str, Any]):
+        self.block = block
+
+    def _quota_url(self) -> str:
+        base_url = (self.block.get("base_url") or "").strip().rstrip("/")
+        if "minimax.io" in base_url:
+            return self.GLOBAL_QUOTA_BASE + self.QUOTA_PATH
+        return self.DEFAULT_QUOTA_BASE + self.QUOTA_PATH
+
+    def check(self) -> ProviderStatus:
+        st = ProviderStatus(
+            id=self.block["id"],
+            display_name=self.block.get("display_name") or "MiniMax",
+            enabled=bool(self.block.get("enabled", False)),
+            last_checked=_now_local_iso(),
+        )
+        if not st.enabled:
+            st.auth_status = "disabled"
+            st.quota_status = "disabled"
+            return st
+
+        key = (self.block.get("api_key") or "").strip()
+        if not key or key == "***":
+            st.auth_status = "not_configured"
+            st.auth_detail = "api_key is empty or placeholder"
+            st.quota_status = "not_configured"
+            return st
+
+        url = self._quota_url()
+        st.quota_source = url
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "User-Agent": "ailimit/0.1",
+        }
+        try:
+            data = _get_json(url, headers)
+        except urllib.error.HTTPError as e:
+            st.auth_status = "failed" if e.code in (401, 403) else "ok"
+            st.quota_status = "unavailable"
+            st.error = f"HTTP {e.code}"
+            return st
+        except Exception as e:
+            st.auth_status = "failed"
+            st.quota_status = "unavailable"
+            st.error = str(e)
+            return st
+
+        if not isinstance(data, dict):
+            st.auth_status = "failed"
+            st.quota_status = "unavailable"
+            st.error = "non-object response"
+            return st
+
+        base_resp = data.get("base_resp") or {}
+        if base_resp.get("status_code") != 0:
+            code = base_resp.get("status_code")
+            msg = base_resp.get("status_msg") or "unknown"
+            st.auth_status = "failed"
+            st.quota_status = "unavailable"
+            st.error = f"base_resp {code}: {msg}"
+            st.auth_detail = f"base_resp {code}: {msg}"
+            return st
+
+        remains = data.get("model_remains") or []
+        if not isinstance(remains, list) or not remains:
+            st.auth_status = "ok"
+            st.quota_status = "unavailable"
+            st.quota_detail = "model_remains is empty"
+            st.extra["raw"] = data
+            return st
+
+        filtered = [r for r in remains
+                    if isinstance(r, dict)
+                    and r.get("model_name") not in _MINIMAX_SKIP_MODELS]
+        if not filtered:
+            st.auth_status = "ok"
+            st.quota_status = "unavailable"
+            st.quota_detail = "no text model entries (all multimodal)"
+            return st
+
+        chosen = next((r for r in filtered if r.get("model_name") == "general"),
+                      filtered[0])
+        model_name = chosen.get("model_name") or "?"
+
+        def _used_from_remaining(rem_pct):
+            if rem_pct is None:
+                return None
+            return _clamp_percent(100.0 - _clamp_percent(rem_pct))
+
+        used_5h = _used_from_remaining(chosen.get("current_interval_remaining_percent"))
+        if used_5h is None or used_5h == 0.0:
+            total = chosen.get("current_interval_total_count")
+            usage = chosen.get("current_interval_usage_count")
+            try:
+                if total and total > 0 and usage is not None:
+                    fallback = round(100.0 * float(usage) / float(total), 1)
+                    used_5h = _clamp_percent(fallback)
+            except (TypeError, ValueError):
+                pass
+        if used_5h is None:
+            used_5h = 0.0
+
+        used_7d = _used_from_remaining(chosen.get("current_weekly_remaining_percent"))
+        if used_7d is None:
+            used_7d = 0.0
+
+        remaining_5h = 100.0 - used_5h
+        remaining_7d = 100.0 - used_7d
+
+        parts = [f"5h: {remaining_5h:.1f}% left"]
+        rt = _fmt_remains_seconds(chosen.get("remains_time"))
+        if rt:
+            parts[-1] += f" (in {rt})"
+        parts.append(f"7d: {remaining_7d:.1f}% left")
+        wt = _fmt_remains_seconds(chosen.get("weekly_remains_time"))
+        if wt:
+            parts[-1] += f" (in {wt})"
+        parts.append(f"model: {model_name}")
+
+        st.auth_status = "ok"
+        st.auth_detail = f"{len(filtered)} text model(s) reachable"
+        st.quota_status = "ok"
+        st.quota_detail = ", ".join(parts)
+        st.extra["primary"] = {"used_percent": used_5h,
+                               "remains_time": chosen.get("remains_time")}
+        st.extra["weekly"] = {"used_percent": used_7d,
+                              "remains_time": chosen.get("weekly_remains_time")}
+        st.extra["model_name"] = model_name
+        return st
+
+
 # ------------------------------------------------------- OpenAI-compatible
 class OpenAICompatProvider:
-    """Used by GLM and MiniMax.
+    """Generic OpenAI-compatible probe, kept for future custom providers.
 
-    Auth probe: GET ${base_url}/models with Bearer key.
-    Optional quota probe: GET ${optional_quota_url} with same Bearer key,
-    extract field via ${optional_quota_json_path} (dotted, supports list idx).
+    Auth probe: GET {base_url}/models with Bearer key.
+    No built-in quota path; quota is "not_configured" unless caller wires
+    something up elsewhere.
     """
 
     def __init__(self, block: dict[str, Any]):
@@ -236,7 +508,7 @@ class OpenAICompatProvider:
 
         key = (self.block.get("api_key") or "").strip()
         base_url = (self.block.get("base_url") or "").strip().rstrip("/")
-        if not key or not base_url:
+        if not key or key == "***" or not base_url:
             st.auth_status = "not_configured"
             st.auth_detail = "api_key and base_url required"
             st.quota_status = "not_configured"
@@ -247,62 +519,26 @@ class OpenAICompatProvider:
             "Accept": "application/json",
             "User-Agent": "ailimit/0.1",
         }
-
         try:
             data = _get_json(f"{base_url}/models", headers)
-            model_count = len(data.get("data") or []) if isinstance(data, dict) else 0
+            n = len(data.get("data") or []) if isinstance(data, dict) else 0
             st.auth_status = "ok"
-            st.auth_detail = f"{model_count} models reachable"
+            st.auth_detail = f"{n} models reachable"
         except urllib.error.HTTPError as e:
             st.auth_status = "failed"
             st.auth_detail = f"/models HTTP {e.code}"
             st.error = f"{e.code} {e.reason}"
+            st.quota_status = "unavailable"
+            return st
         except Exception as e:
             st.auth_status = "failed"
             st.auth_detail = f"/models error: {e}"
             st.error = str(e)
-
-        if st.auth_status != "ok":
             st.quota_status = "unavailable"
             return st
 
-        quota_url = (self.block.get("optional_quota_url") or "").strip()
-        if not quota_url:
-            st.quota_status = "not_configured"
-            st.quota_detail = "no optional_quota_url set; API key works but quota endpoint not configured"
-            return st
-
-        try:
-            qdata = _get_json(quota_url, headers)
-        except urllib.error.HTTPError as e:
-            st.quota_status = "unavailable"
-            st.quota_detail = f"quota_url HTTP {e.code}"
-            st.error = (st.error + "; " if st.error else "") + f"quota HTTP {e.code}"
-            return st
-        except Exception as e:
-            st.quota_status = "unavailable"
-            st.quota_detail = f"quota_url error: {e}"
-            st.error = (st.error + "; " if st.error else "") + str(e)
-            return st
-
-        st.quota_source = quota_url
-        path = (self.block.get("optional_quota_json_path") or "").strip()
-        if not path:
-            st.quota_status = "ok"
-            st.quota_detail = "quota_url responded (no json_path set; raw response in extra)"
-            st.extra["quota_raw"] = qdata
-            return st
-
-        value = _walk_json_path(qdata, path)
-        if value is None:
-            st.quota_status = "unavailable"
-            st.quota_detail = f"json_path {path!r} not found in response"
-            st.extra["quota_raw"] = qdata
-            return st
-
-        st.quota_status = "ok"
-        st.quota_detail = f"{path} = {value}"
-        st.extra["quota_value"] = value
+        st.quota_status = "not_configured"
+        st.quota_detail = "generic provider has no built-in quota endpoint"
         return st
 
 
@@ -311,6 +547,10 @@ def build_provider(block: dict[str, Any]):
     kind = block.get("kind")
     if kind == "codex":
         return CodexProvider(block)
+    if kind == "glm":
+        return GLMProvider(block)
+    if kind == "minimax":
+        return MiniMaxProvider(block)
     if kind == "openai_compatible":
         return OpenAICompatProvider(block)
     raise ValueError(f"unknown provider kind: {kind!r}")

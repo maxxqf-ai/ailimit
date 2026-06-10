@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "providers": {
     "codex": {
       "id": "codex",
@@ -10,23 +10,19 @@
     },
     "glm": {
       "id": "glm",
-      "kind": "openai_compatible",
+      "kind": "glm",
       "enabled": false,
       "display_name": "GLM",
       "api_key": "PUT_YOUR_KEY_HERE",
-      "base_url": "https://open.bigmodel.cn/api/paas/v4",
-      "optional_quota_url": "",
-      "optional_quota_json_path": ""
+      "base_url": "https://api.z.ai"
     },
-    "MiniMax": {
-      "id": "MiniMax",
-      "kind": "openai_compatible",
+    "minimax": {
+      "id": "minimax",
+      "kind": "minimax",
       "enabled": false,
       "display_name": "MiniMax",
       "api_key": "PUT_YOUR_KEY_HERE",
-      "base_url": "https://api.minimaxi.com/v1",
-      "optional_quota_url": "",
-      "optional_quota_json_path": ""
+      "base_url": "https://api.minimaxi.com"
     }
   }
 }
