@@ -1,6 +1,6 @@
 # ailimit
 
-**macOS status-bar quota monitor for Codex, GLM, and MiniMax.** Sits in your menu bar as `AI  C:84% G:72% M:91%` and refreshes every 5 minutes. Real numbers from the vendors' own endpoints — no fakes.
+**macOS status-bar quota monitor for Codex, GLM, and MiniMax.** Sits in your menu bar as `C 84% 🔋  G 72% 🔋  M 91% 🔋` (short tag + percent + SF Symbols battery icon) and refreshes every 5 minutes. Real numbers from the vendors' own endpoints — no fakes.
 
 | Provider | What we read | How |
 |---|---|---|
@@ -53,12 +53,15 @@ The web UI also serves a status table at `/` and a JSON snapshot at `/api/status
 
 ## Status bar legend
 
+Each provider is rendered as `<tag> <percent>% [battery icon]`. Tags are `C` (Codex), `G` (GLM), `M` (MiniMax). The battery icon is an SF Symbol — `battery.0` / `battery.25` / `battery.50` / `battery.75` / `battery.100` — selected by the percent, with `setTemplate_(True)` so the system handles light/dark/vibrancy automatically.
+
 | Mark | Meaning |
 |---|---|
-| `C:84%` | Codex live percent of 5h quota remaining |
-| `G:-` | GLM disabled or not configured (no fake number) |
-| `M:!` | MiniMax live call failed (HTTP error, bad key, etc.) — see dropdown for details |
-| `AI !` prefix | at least one provider is in a failure state |
+| `C 84% [battery.100]` | Codex live percent of 5h quota remaining, with battery icon matching the percent |
+| `G -` | GLM disabled or not configured (no fake number, no battery) |
+| `M ⚠` | MiniMax live call failed (HTTP error, bad key, etc.) — see dropdown for details |
+
+If AppKit/PyObjC isn't importable (e.g. running off-macOS), the title falls back to a plain-text bar: `C 84% ▰▰▱▱  G -  M ⚠`.
 
 The dropdown shows the full per-provider block: `auth`, `quota`, `source`, `last_checked`, `error`. Items: `Refresh Now` · `Open Settings` · `Open Web UI` · `Quit`.
 

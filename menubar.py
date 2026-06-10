@@ -1,13 +1,21 @@
-"""macOS menu bar app for ailimit (rumps).
+"""macOS menu bar app for ailimit (rumps + AppKit).
 
 Calls `providers.check_all()` on the same config the CLI and Web UI use.
-The status bar title is a compact summary like `AI  C:84% G:72% M:91%`;
-the dropdown shows the full auth/quota/detail/error lines per provider.
-Refresh is manual via "Refresh Now" and automatic every 5 minutes.
+The status bar shows each provider as a short tag, the 5h percent, and an
+SF Symbols battery image — e.g. `C 84% [battery.100]  G 72% [battery.75]  M 91% [battery.100]`.
+Disabled / not_configured shows `C -`; live failure shows `C ⚠`. The dropdown
+shows the full auth/quota/detail/error lines per provider. Refresh is manual
+via "Refresh Now" and automatic every 5 minutes.
 
-The rumps import is guarded so the helper functions (`build_title`,
-`_short_for_status`) stay unit-testable on machines where rumps isn't
-installed yet. `main()` is the only entry point that needs rumps.
+AppKit is used for the battery icons (NSImage + NSTextAttachment +
+NSAttributedString on the NSStatusBar button). If AppKit isn't importable
+(fresh pip install without PyObjC, or running off-macOS for tests), the
+title falls back to a plain-text bar: `C 84% ▰▰▱▱`. The dropdown always
+uses the rumps MenuItem text path.
+
+The rumps and AppKit imports are both guarded so the helper functions
+(`_short_percent`, `_native_bar`, `_build_items`, `build_title`) stay
+unit-testable on machines without either installed.
 """
 from __future__ import annotations
 
@@ -21,6 +29,11 @@ try:
     import rumps  # type: ignore
 except ImportError:
     rumps = None  # type: ignore
+
+try:
+    import AppKit  # type: ignore
+except ImportError:
+    AppKit = None  # type: ignore
 
 from providers import ProviderStatus, check_all
 from settings import load_config
@@ -54,13 +67,7 @@ def _short_percent(detail: str) -> Optional[int]:
 
 
 def _short_for_status(st: ProviderStatus) -> str:
-    """Single-char-or-percent marker for a provider in the title bar.
-
-    Disabled / not_configured -> "-" (no live signal, no fake number).
-    Live failure (auth=failed OR quota=unavailable/failed) -> "!".
-    Live success -> "84%" style.
-    Anything else -> "?" (shouldn't happen in practice).
-    """
+    """Single-char-or-percent marker for a provider in the title bar (legacy text mode)."""
     if not st.enabled or st.auth_status == "disabled" or st.quota_status == "disabled":
         return "-"
     if st.auth_status == "not_configured" or st.quota_status == "not_configured":
@@ -73,8 +80,35 @@ def _short_for_status(st: ProviderStatus) -> str:
     return "?"
 
 
+# One bar item is (label, percent_or_none, state) where state is
+#   "ok"    -> render label + percent + battery icon
+#   "empty" -> render "label -" (disabled or not_configured; no fake number)
+#   "error" -> render "label ⚠" (live call failed; no battery)
+def _build_items(statuses: list[ProviderStatus]) -> list[tuple[str, Optional[int], str]]:
+    items: list[tuple[str, Optional[int], str]] = []
+    for st in statuses:
+        tag = _TITLE_TAGS.get(st.id)
+        if not tag:
+            continue
+        if not st.enabled or st.auth_status == "disabled" or st.quota_status == "disabled":
+            items.append((tag, None, "empty"))
+        elif st.auth_status == "not_configured" or st.quota_status == "not_configured":
+            items.append((tag, None, "empty"))
+        elif st.quota_status == "ok" and st.auth_status == "ok":
+            pct = _short_percent(st.quota_detail)
+            if pct is not None:
+                items.append((tag, pct, "ok"))
+            else:
+                # We have "ok" status but couldn't parse a percent — surface as error.
+                items.append((tag, None, "error"))
+        else:
+            items.append((tag, None, "error"))
+    return items
+
+
 def build_title(statuses: list[ProviderStatus]) -> str:
-    """Build the menu bar title. `AI` prefix; `!` if any provider is in error."""
+    """Legacy plain-text title builder. Still used for tests; the live menu
+    bar uses `_native_bar_from_items` / `_set_bar_with_batteries` instead."""
     parts: list[str] = []
     had_error = False
     for st in statuses:
@@ -90,6 +124,201 @@ def build_title(statuses: list[ProviderStatus]) -> str:
     return f"{prefix}  " + " ".join(parts)
 
 
+# ---------------------------------------------------------------- text fallback
+def _native_bar(pct: Optional[int], width: int = 4) -> str:
+    """Unicode bar used when AppKit isn't available.
+
+    pct=0   -> "▱▱▱▱"
+    pct=50  -> "▰▰▱▱"   (2 filled)
+    pct=100 -> "▰▰▰▰"
+    None    -> ""
+    """
+    if pct is None:
+        return ""
+    pct = max(0, min(100, int(pct)))
+    filled = round(pct / 100.0 * width)
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def _native_bar_from_items(items: list[tuple[str, Optional[int], str]]) -> str:
+    """Render the same items the AppKit path renders, but as plain text.
+
+    e.g.  "C 84% ▰▰▱▱  G -  M ⚠"
+    """
+    parts: list[str] = []
+    for label, pct, state in items:
+        if state == "ok" and pct is not None:
+            parts.append(f"{label} {pct}% {_native_bar(pct)}")
+        elif state == "empty":
+            parts.append(f"{label} -")
+        else:  # "error"
+            parts.append(f"{label} ⚠")
+    return "  ".join(parts) if parts else "AI"
+
+
+# ---------------------------------------------------------------- AppKit render
+_BATTERY_TIERS = (
+    (13, "battery.0"),
+    (38, "battery.25"),
+    (63, "battery.50"),
+    (88, "battery.75"),
+)
+
+
+def _battery_symbol(pct: int) -> str:
+    for threshold, name in _BATTERY_TIERS:
+        if pct < threshold:
+            return name
+    return "battery.100"
+
+
+def _sf_battery_image(pct: int, point_size: int = 14):
+    """Return a template-mode NSImage for the percent, or None if AppKit missing."""
+    if AppKit is None:
+        return None
+    try:
+        img = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            _battery_symbol(pct), None
+        )
+    except Exception:
+        return None
+    if img is None:
+        return None
+    try:
+        img.setTemplate_(True)
+    except Exception:
+        pass
+    return img
+
+
+def _battery_attachment(pct: int, font):
+    """Wrap the SF battery image in an NSTextAttachment so it can sit in an NSAttributedString."""
+    if AppKit is None:
+        return None
+    img = _sf_battery_image(pct, point_size=14)
+    if img is None:
+        return None
+    attach = AppKit.NSTextAttachment.alloc().init()
+    try:
+        attach.setImage_(img)
+    except Exception:
+        return None
+    return attach
+
+
+def _render_attributed_title(items: list[tuple[str, Optional[int], str]]):
+    """Build an NSAttributedString of the form `C 84% [battery]  G -  M ⚠`.
+
+    Returns None if AppKit isn't available; callers should fall back to text.
+    """
+    if AppKit is None:
+        return None
+    try:
+        font = AppKit.NSFont.menuBarFontOfSize_(0)
+    except Exception:
+        font = None
+    attrs: dict = {}
+    if font is not None:
+        attrs[AppKit.NSFontAttributeName] = font
+
+    result = AppKit.NSMutableAttributedString.alloc().init()
+    for i, (label, pct, state) in enumerate(items):
+        prefix = "" if i == 0 else "  "
+        if state == "ok" and pct is not None:
+            seg = f"{prefix}{label} {pct}% "
+            result.appendAttributedString_(
+                AppKit.NSAttributedString.attributedStringWithString_attributes_(seg, attrs)
+            )
+            attach = _battery_attachment(pct, font)
+            if attach is not None:
+                attach_str = AppKit.NSAttributedString.alloc().initWithAttachment_(attach)
+                result.appendAttributedString_(attach_str)
+        elif state == "empty":
+            seg = f"{prefix}{label} -"
+            result.appendAttributedString_(
+                AppKit.NSAttributedString.attributedStringWithString_attributes_(seg, attrs)
+            )
+        else:  # "error"
+            seg = f"{prefix}{label} ⚠"
+            result.appendAttributedString_(
+                AppKit.NSAttributedString.attributedStringWithString_attributes_(seg, attrs)
+            )
+    return result
+
+
+def _status_button(app):
+    """Locate the rumps-managed NSStatusBar button. Returns the NSButton or None.
+
+    Tries the rumps internals across versions, then as a last resort scans the
+    app's attributes for anything exposing `.button()` that responds to
+    `setAttributedTitle_` (i.e. an NSStatusBarButton-shaped thing).
+    """
+    if app is None:
+        return None
+    candidates: list = []
+    for attr in ("_status_item", "_status_bar_item", "_nsstatusitem"):
+        item = getattr(app, attr, None)
+        if item is not None:
+            candidates.append(item)
+    nsapp = getattr(app, "_nsapp", None)
+    if nsapp is not None:
+        for inner_attr in ("nsstatusitem", "statusItem"):
+            inner = getattr(nsapp, inner_attr, None)
+            if inner is not None:
+                candidates.append(inner)
+    for item in candidates:
+        b = getattr(item, "button", None)
+        if callable(b):
+            try:
+                btn = b()
+            except Exception:
+                btn = None
+            if btn is not None and hasattr(btn, "setAttributedTitle_"):
+                return btn
+        elif b is not None and hasattr(b, "setAttributedTitle_"):
+            return b
+    # Last resort: scan the app's attributes.
+    for name in dir(app):
+        if name.startswith("__"):
+            continue
+        try:
+            val = getattr(app, name)
+        except Exception:
+            continue
+        if val is None:
+            continue
+        b = getattr(val, "button", None)
+        if not callable(b):
+            continue
+        try:
+            btn = b()
+        except Exception:
+            continue
+        if btn is not None and hasattr(btn, "setAttributedTitle_"):
+            return btn
+    return None
+
+
+def _set_bar_with_batteries(app, items) -> bool:
+    """Set the NSStatusBar button's attributed title to the battery-rendered string.
+    Returns True on success; False if the button or the attributed string couldn't
+    be produced — callers should fall back to plain text in that case."""
+    if AppKit is None:
+        return False
+    button = _status_button(app)
+    if button is None:
+        return False
+    attributed = _render_attributed_title(items)
+    if attributed is None:
+        return False
+    try:
+        button.setAttributedTitle_(attributed)
+    except Exception:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------- dropdown text
 def _menu_lines(st: ProviderStatus) -> list[str]:
     """Build the per-provider dropdown block (multi-line menu item title)."""
     lines = [f"{st.display_name} ({st.id})"]
@@ -175,7 +404,12 @@ def _build_app_class():
                     item.title = f"refresh error: {e}"
                 return
 
-            self.title = build_title(self.statuses)
+            items = _build_items(self.statuses)
+            # Default path: AppKit SF Symbols battery icons in the menu bar.
+            if not _set_bar_with_batteries(self, items):
+                # Fallback: plain-text bar (no AppKit, or button not reachable).
+                self.title = _native_bar_from_items(items)
+            # Dropdown text always updated.
             for item, st in zip(self._status_items, self.statuses):
                 item.title = "\n".join(_menu_lines(st))
 
