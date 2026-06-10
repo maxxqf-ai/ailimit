@@ -234,7 +234,11 @@ def _battery_attachment(pct: int, font):
             except Exception:
                 w, h = 0.0, 0.0
             if w > 0 and h > 0:
-                y_offset = -((cap - h) / 2.0)
+                # Upstream ai-limit formula: shift the image so it centers on
+                # the font's cap height. Positive when the symbol is smaller
+                # than capHeight (pushes up toward the cap line), negative
+                # when it's larger (lets it drop down to fit).
+                y_offset = (cap - h) / 2.0
                 attach.setBounds_(AppKit.NSMakeRect(0.0, y_offset, w, h))
         except Exception:
             pass
