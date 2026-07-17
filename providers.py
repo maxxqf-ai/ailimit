@@ -90,6 +90,21 @@ def _fmt_remains_seconds(secs: Any) -> str:
     return f"{m}m"
 
 
+def _fmt_reset_suffix(value: Any) -> str:
+    """Return ` (reset MM-DD HH:MM)` when the value is parseable, else ""."""
+    formatted = _fmt_reset(value)
+    return f" (reset {formatted})" if formatted else ""
+
+
+def _fmt_reset_or_in(value: Any, remains: Any = None) -> str:
+    """Prefer an absolute reset timestamp; otherwise fall back to a duration."""
+    suffix = _fmt_reset_suffix(value)
+    if suffix:
+        return suffix
+    text = _fmt_remains_seconds(remains)
+    return f" (in {text})" if text else ""
+
+
 def _get_json(url: str, headers: dict[str, str], timeout: int = REMOTE_TIMEOUT_SEC) -> Any:
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -162,7 +177,7 @@ class CodexProvider:
                 return "-"
             used = win.get("used_percent", 0) or 0
             remaining = max(0.0, 100.0 - float(used))
-            return f"{remaining:.1f}% left"
+            return f"{remaining:.1f}% left{_fmt_reset_suffix(win.get('resets_at'))}"
 
         st.quota_detail = (
             f"5h: {_fmt(primary)}, 7d: {_fmt(secondary)}, "
@@ -316,16 +331,17 @@ class GLMProvider:
 
         used_5h = _clamp_percent(primary.get("percentage", 0))
         remaining_5h = 100.0 - used_5h
-        reset_5h = _fmt_reset(primary.get("nextResetTime"))
-        parts = [f"5h: {remaining_5h:.1f}% left"
-                 + (f" (reset {reset_5h})" if reset_5h else "")]
+        primary_suffix = _fmt_reset_suffix(primary.get("nextResetTime"))
+        if not primary_suffix and used_5h == 0:
+            primary_suffix = " (starts on first use)"
+        parts = [f"5h: {remaining_5h:.1f}% left{primary_suffix}"]
 
         if secondary is not None:
             used_7d = _clamp_percent(secondary.get("percentage", 0))
             remaining_7d = 100.0 - used_7d
-            reset_7d = _fmt_reset(secondary.get("nextResetTime"))
-            parts.append(f"7d: {remaining_7d:.1f}% left"
-                         + (f" (reset {reset_7d})" if reset_7d else ""))
+            parts.append(
+                f"7d: {remaining_7d:.1f}% left{_fmt_reset_suffix(secondary.get('nextResetTime'))}"
+            )
             st.extra["weekly"] = {"used_percent": used_7d,
                                   "resets_at": secondary.get("nextResetTime")}
 
@@ -478,15 +494,13 @@ class MiniMaxProvider:
         remaining_5h = 100.0 - used_5h
         remaining_7d = 100.0 - used_7d
 
-        parts = [f"5h: {remaining_5h:.1f}% left"]
-        rt = _fmt_remains_seconds(chosen.get("remains_time"))
-        if rt:
-            parts[-1] += f" (in {rt})"
-        parts.append(f"7d: {remaining_7d:.1f}% left")
-        wt = _fmt_remains_seconds(chosen.get("weekly_remains_time"))
-        if wt:
-            parts[-1] += f" (in {wt})"
-        parts.append(f"model: {model_name}")
+        parts = [
+            f"5h: {remaining_5h:.1f}% left"
+            f"{_fmt_reset_or_in(chosen.get('end_time'), chosen.get('remains_time'))}",
+            f"7d: {remaining_7d:.1f}% left"
+            f"{_fmt_reset_or_in(chosen.get('weekly_end_time'), chosen.get('weekly_remains_time'))}",
+            f"model: {model_name}",
+        ]
 
         st.auth_status = "ok"
         st.auth_detail = f"{len(filtered)} text model(s) reachable"

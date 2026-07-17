@@ -53,8 +53,8 @@ def _short_percent(detail: str) -> Optional[int]:
 
     Detail formats we know about (all start with "5h: N.N% left"):
       GLM:      "5h: 84.0% left (reset 06-10 17:00), 7d: 95.0% left (reset 06-15 09:00)"
-      MiniMax:  "5h: 84.0% left (in 2h15m), 7d: 95.0% left (in 5d3h), model: general"
-      Codex:    "5h: 84.0% left, 7d: 95.0% left, plan: pro"
+      MiniMax:  "5h: 84.0% left (reset 06-10 17:00), 7d: 95.0% left (reset 06-15 09:00), model: general"
+      Codex:    "5h: 84.0% left (reset 06-10 17:00), 7d: 95.0% left (reset 06-15 09:00), plan: pro"
     Returns the integer 5h percent, clamped 0..100, or None if no match.
     """
     m = re.search(r"(\d+(?:\.\d+)?)\s*%\s*left", detail or "")

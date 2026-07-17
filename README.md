@@ -106,7 +106,7 @@ uninstall.sh   unloads agent, removes plist (keeps config by default)
 1. `GET https://api.z.ai/api/monitor/usage/quota/limit`
 2. Header `Authorization: <api_key>` — **no Bearer prefix**.
 3. Success = `HTTP 200` AND JSON `success: true`.
-4. From `data.limits[]`, filter `type == "TOKENS_LIMIT"`, sort by `nextResetTime` ascending. First entry's `percentage` = 5h used, second = weekly used. Remaining = `100 - percentage`, clamped to 0–100.
+4. From `data.limits[]`, filter `type == "TOKENS_LIMIT"`, sort by `nextResetTime` ascending. First entry's `percentage` = 5h used, second = weekly used. Remaining = `100 - percentage`, clamped to 0–100. When `nextResetTime` is present, the UI shows it as that window's `reset MM-DD HH:MM`.
 5. Errors: HTTP 401 / 429, or `success: false` (e.g. `Unauthorized`), surface verbatim.
 
 ### MiniMax (Token Plan)
@@ -116,7 +116,7 @@ uninstall.sh   unloads agent, removes plist (keeps config by default)
 3. HTTP 200 alone is **not** success — `base_resp.status_code == 0` is required. `1004` = invalid token, `1005` = no permission, `1024` = quota exhausted.
 4. From `model_remains[]`, skip `video / audio / image / music / speech`. Prefer `model_name == "general"`; otherwise the first remaining entry.
 5. Used % = `100 - current_interval_remaining_percent` (and `current_weekly_remaining_percent`). If the percent field is missing or 0, fall back to `round(100 * current_interval_usage_count / current_interval_total_count)` for 5h.
-6. `remains_time` and `weekly_remains_time` (seconds) are shown alongside as `(in 2h15m)`.
+6. Prefer `end_time` / `weekly_end_time` as the visible 5h / 7d reset times. `remains_time` / `weekly_remains_time` may still appear in the raw payload, but they are not the primary user-facing clock.
 
 ## Limitations
 
