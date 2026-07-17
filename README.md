@@ -10,6 +10,17 @@
 
 **No fake numbers.** When `api_key` is empty or set to `***`, the provider is reported as `not_configured` and **no** HTTP request is made. Real failures surface as `auth: failed` / `quota: unavailable` with the underlying status code or message.
 
+## Project origin
+
+This repository is a standalone derivative project based on
+[zhuchenxi113/ai-limit](https://github.com/zhuchenxi113/ai-limit).
+
+This version is focused on a smaller macOS menu bar tool and has been adapted for:
+
+- Codex / GLM / MiniMax quota monitoring
+- provider-specific reset-time handling
+- local install / uninstall flow for a menu bar app
+
 ## Install (macOS, status bar)
 
 ```bash
