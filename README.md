@@ -21,6 +21,18 @@ This version is focused on a smaller macOS menu bar tool and has been adapted fo
 - provider-specific reset-time handling
 - local install / uninstall flow for a menu bar app
 
+## 项目来源
+
+本仓库是基于
+[zhuchenxi113/ai-limit](https://github.com/zhuchenxi113/ai-limit)
+改造出来的独立衍生项目。
+
+当前版本主要聚焦更小的 macOS 菜单栏工具，并针对以下方向做了调整：
+
+- Codex / GLM / MiniMax 配额监控
+- 不同 provider 的重置时间显示处理
+- 菜单栏应用的本地安装 / 卸载流程
+
 ## Install (macOS, status bar)
 
 ```bash
